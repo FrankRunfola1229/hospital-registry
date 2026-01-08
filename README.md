@@ -1,58 +1,71 @@
 # healthcare-hospitals-medallion01 (ADF + ADLS Gen2 + Databricks, CSV, Managed Identity only)
 
+A small, job-relevant Azure data engineering project using **public healthcare CSV data**, **ADLS Gen2**, **Azure Data Factory**, and **Azure Databricks**.
+
+✅ **No secret keys / no PATs / no connection strings** — use **Managed Identity** end-to-end:
+- **ADF** uses its **system-assigned managed identity** to write to ADLS (RBAC).
+- **ADF → Databricks** uses **MSI authentication** for the Databricks linked service (no PAT token).
+- **Databricks → ADLS** uses a **managed identity** via an **Access Connector for Azure Databricks** + **Unity Catalog external location** (recommended approach for “no secrets”).
+
+---
+
 ## 1) Use case (what you say in interviews)
+
 **“Public healthcare provider registry ingestion + quality-ready curated layer.”**
 
-We ingest a public CMS/Medicare hospital registry CSV, land it in a data lake (Bronze), clean and standardize it (Silver), and publish analyst-ready aggregates (Gold) such as:
+We ingest a public CMS/Medicare hospital registry CSV, land it in a lake (Bronze), clean and standardize it (Silver), and publish analyst-ready aggregates (Gold) like:
 - hospitals by state (counts, % with emergency services)
 - rating distribution
 - hospitals by type
 
-No PHI, no secrets, no keys. Access is enforced using **Managed Identity** end-to-end.
+**Data source (public CSV):**
+- Hospital General Information (CMS / Medicare Open Data)
+  - https://data.medicare.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD
 
-Data source (public):
-- Hospital General Information CSV (CMS/Medicare open data):  
-  `https://data.medicare.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD` :contentReference[oaicite:1]{index=1}
+No PHI. This is safe portfolio data.
 
 ---
 
 ## 2) Architecture
+
 **Services**
-- Azure Data Lake Storage Gen2 (ADLS) – storage for Bronze/Silver/Gold
-- Azure Data Factory (ADF) – orchestration + ingestion (HTTP → ADLS) + triggers
-- Azure Databricks – transformations (PySpark) + Delta outputs
+- **ADLS Gen2**: `bronze/`, `silver/`, `gold/`
+- **Azure Data Factory**: copy (HTTP→ADLS) + orchestration + run notebook
+- **Azure Databricks**: PySpark transform + Delta outputs
 
 **Flow**
-1. ADF copies public CSV → ADLS Bronze (partitioned by run date)
-2. ADF runs Databricks notebook
-3. Databricks reads Bronze CSV → writes Silver Delta
-4. Databricks creates Gold Delta aggregates
+1. ADF copies public CSV → ADLS **Bronze** (partitioned by run date)
+2. ADF triggers Databricks notebook
+3. Databricks reads Bronze CSV → writes **Silver** Delta
+4. Databricks creates **Gold** Delta aggregates
 
-ASCII diagram:
-
+```
 [Public CMS CSV] --(ADF Copy Activity)--> [ADLS Bronze]
                                    |
                                    +--(ADF Databricks Activity)--> [Databricks Notebook]
                                                                   |-> [ADLS Silver (Delta)]
                                                                   |-> [ADLS Gold (Delta)]
+```
 
 ---
 
-## 3) What you will build (deliverables)
-- ADLS containers: `bronze`, `silver`, `gold`
-- ADF pipeline:
-  - Copy Activity: HTTP source → ADLS Bronze sink
-  - Databricks Notebook Activity: transforms Bronze→Silver→Gold
-- Databricks notebook (PySpark):
-  - standardize column names (snake_case)
-  - fix data types (rating to int, zip to string)
-  - clean “Not Available” values
-  - deduplicate by provider_id
-  - write Delta outputs
+## 3) Repo structure
+
+```
+healthcare-hospitals-medallion01/
+├── README.md
+├── .gitignore
+├── notebooks/
+│   └── 01_hospital_general_information_medallion.py
+├── adf/
+│   └── pipeline_pl_hospital_general_information_to_medallion.md
+└── docs/
+    └── managed-identity-notes.md
+```
 
 ---
 
-## 4) Step-by-step setup (Azure Portal friendly)
+## 4) Step-by-step (Azure Portal friendly)
 
 ### Step 0 — Naming (keep it simple)
 - Resource group: `rg-healthcare-hospitals-medallion01`
@@ -60,153 +73,84 @@ ASCII diagram:
 - ADF: `adf-healthcare-hospitals01`
 - Databricks: `adb-healthcare-hospitals01`
 
----
+### Step 1 — Create ADLS Gen2 (HNS ON)
+1. Create Storage account
+2. Advanced → **Enable hierarchical namespace = ON**
+3. Create containers:
+   - `bronze`
+   - `silver`
+   - `gold`
 
-### Step 1 — Create Resource Group
-1. Azure Portal → Resource groups → Create
-2. Name: `rg-healthcare-hospitals-medallion01`
-3. Region: pick one and keep **everything in the same region**
-
----
-
-### Step 2 — Create ADLS Gen2 storage account (HNS ON)
-1. Azure Portal → Storage accounts → Create
-2. Name: `sthcmedallion01`
-3. Performance: Standard (cheap)
-4. Redundancy: LRS (cheap)
-5. **Advanced tab → Enable hierarchical namespace = ON** (this makes it ADLS Gen2)
-
-Create containers:
-- `bronze`
-- `silver`
-- `gold`
-
-Folder layout (you’ll see these after first run):
+Target layout:
 - `bronze/hospital_general_information/run_date=YYYY-MM-DD/hospital_general_information.csv`
-- `silver/hospital_general_information/`
-- `gold/hospital_general_information/`
+- `silver/hospital_general_information/` (Delta)
+- `gold/hospital_general_information/hospitals_by_state/` (Delta)
+- `gold/hospital_general_information/rating_distribution/` (Delta)
+- `gold/hospital_general_information/hospitals_by_type/` (Delta)
 
----
+### Step 2 — Create ADF + Managed Identity (no secrets)
+1. Create Data Factory
+2. ADF resource → **Identity** → System assigned → **On**
+3. Storage account → **Access Control (IAM)** → Add role assignment:
+   - Role: **Storage Blob Data Contributor**
+   - Assign to: **ADF managed identity**
 
-### Step 3 — Create Azure Data Factory
-1. Azure Portal → Data factories → Create
-2. Name: `adf-healthcare-hospitals01`
+### Step 3 — Create Databricks + Managed Identity storage access (no secrets)
+To do “no secrets” correctly for Databricks reading/writing ADLS:
+1. Create **Access Connector for Azure Databricks** (system-assigned MI)
+2. Grant that connector RBAC on your storage account:
+   - Role: **Storage Blob Data Contributor**
+3. In Databricks **Unity Catalog**:
+   - Create a **Storage Credential** backed by the Access Connector
+   - Create **External Locations** for your `silver` and `gold` paths
+   - (Optional) Create **Volumes** for simpler paths
 
-Enable ADF System-assigned Managed Identity:
-1. Open ADF resource → **Identity**
-2. System assigned → Status: **On** → Save
+See `docs/managed-identity-notes.md` for a practical checklist.
 
-Grant ADF access to ADLS (RBAC):
-1. Open Storage account → Access Control (IAM) → Add role assignment
-2. Role: **Storage Blob Data Contributor**
-3. Assign access to: **Managed identity**
-4. Select: your Data Factory (`adf-healthcare-hospitals01`) → Review + assign
+### Step 4 — ADF pipeline (HTTP → Bronze → Notebook)
+Build pipeline: `pl_hospital_general_information_to_medallion`
 
-This is the identity ADF will use for the Bronze landing.
-
-ADF Managed Identity basics: :contentReference[oaicite:2]{index=2}
-
----
-
-### Step 4 — Create Azure Databricks + “no secrets” storage access (Managed Identity)
-To access ADLS from Databricks **without secrets**, the clean approach is:
-- Create an **Access Connector for Azure Databricks** (Managed Identity)
-- Grant it Storage RBAC
-- Use Unity Catalog storage credential/external location/volume (recommended)
-
-Microsoft’s guidance on using managed identities with Unity Catalog (no secret rotation): :contentReference[oaicite:3]{index=3}
-
-**4.1 Create Access Connector**
-1. Azure Portal → Create resource → search: **Access Connector for Azure Databricks**
-2. Create it in the same resource group/region
-3. Managed Identity tab → System-assigned: **On**
-4. Create, then copy the connector **Resource ID**
-
-**4.2 Grant connector access to Storage**
-1. Storage account → IAM → Add role assignment
-2. Role: **Storage Blob Data Contributor**
-3. Assign access to: Managed identity
-4. Select: the **Access Connector** you created → assign
-
-**4.3 Create / enable Unity Catalog (lightweight)**
-- In Databricks account console, ensure Unity Catalog is enabled for the workspace.
-- Create a metastore rooted in a dedicated container/path (can be small).
-- Create a Storage Credential using the Access Connector
-- Create an External Location pointing at your `abfss://silver@...` and `abfss://gold@...` paths
-- (Optional) Create Volumes for nicer paths
-
-If your workspace doesn’t have Unity Catalog available, you’ll either need to enable it or accept a legacy auth pattern (which usually involves secrets). This project is intentionally **managed identity only**, so Unity Catalog is the right move.
-
----
-
-### Step 5 — Configure ADF → Databricks with Managed Identity (no PAT token)
-ADF can run Databricks activities using **Managed Identity authentication** (no Personal Access Token). :contentReference[oaicite:4]{index=4}
-
-High level:
-1. In Databricks workspace: grant ADF managed identity permission (Databricks Access Control)
-2. In ADF: create Databricks linked service with Authentication type = **Managed service identity (MSI)**
-
-Microsoft ADF blog describes the MSI-based Databricks linked service and that it removes secrets/tokens. :contentReference[oaicite:5]{index=5}
-
----
-
-## 5) ADF build (pipeline)
-
-### Linked Services
-Create these in ADF Studio:
-1) **HTTP Linked Service**
-- No auth needed
-- Base URL can be blank, you can put full URL in dataset
-
-2) **ADLS Gen2 Linked Service**
-- Auth: Managed Identity (System-assigned MI)
-- Point to your storage account
-
-3) **Azure Databricks Linked Service**
-- Auth: **Managed service identity (MSI)** :contentReference[oaicite:6]{index=6}
-- Workspace resource id: your Databricks workspace ARM id
-- Cluster: choose a jobs cluster or existing cluster (keep it single-node + auto-terminate for cost)
-
-### Datasets
-1) HTTP dataset (DelimitedText)
-- URL: `https://data.medicare.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD` :contentReference[oaicite:7]{index=7}
-- First row as header: true
-
-2) ADLS dataset (DelimitedText)
-- Container: `bronze`
-- Directory: `hospital_general_information/run_date=@{pipeline().parameters.run_date}`
-- File name: `hospital_general_information.csv`
-
-### Pipeline: `pl_hospital_general_information_to_medallion`
-Parameters:
-- `run_date` (String) default: `@formatDateTime(utcNow(),'yyyy-MM-dd')`
-- `source_url` (String) default: the CMS CSV URL
+- Pipeline parameters:
+  - `run_date` default: `@formatDateTime(utcNow(),'yyyy-MM-dd')`
+  - `source_url` default: `https://data.medicare.gov/api/views/xubh-q36u/rows.csv?accessType=DOWNLOAD`
 
 Activities:
-1) **Copy data** (HTTP → ADLS Bronze)
-- Source: HTTP dataset (use `source_url` if you parameterize)
-- Sink: ADLS dataset (folder uses `run_date`)
-- Enable “Skip incompatible row” = off (fail fast for portfolio clarity)
+1. **Copy Data** (Source = HTTP dataset, Sink = ADLS Bronze dataset)
+2. **Databricks Notebook** activity
+   - Notebook: `01_hospital_general_information_medallion`
+   - Parameters:
+     - `storage_account`
+     - `run_date`
 
-2) **Databricks Notebook Activity**
-- Notebook path: `/Repos/.../notebooks/01_hospital_general_information_medallion`
-- Base parameters:
-  - `storage_account`: `sthcmedallion01`
-  - `run_date`: `@{pipeline().parameters.run_date}`
+The exact build steps are in `adf/pipeline_pl_hospital_general_information_to_medallion.md`.
 
 ---
 
-## 6) Databricks notebook (PySpark) — Bronze → Silver → Gold
-Create a notebook named:
-`01_hospital_general_information_medallion`
+## 5) Run it
+1. Trigger the pipeline manually in ADF (or add a daily trigger)
+2. Verify Bronze file exists in ADLS
+3. Verify Silver/Gold Delta folders are created
+4. In Databricks, run the validation cells at the bottom of the notebook
 
-### Widgets / parameters
-```python
-dbutils.widgets.text("storage_account", "")
-dbutils.widgets.text("run_date", "")
-storage_account = dbutils.widgets.get("storage_account")
-run_date = dbutils.widgets.get("run_date")
+---
 
-bronze_path = f"abfss://bronze@{storage_account}.dfs.core.windows.net/hospital_general_information/run_date={run_date}/hospital_general_information.csv"
-silver_path = f"abfss://silver@{storage_account}.dfs.core.windows.net/hospital_general_information"
-gold_path   = f"abfss://gold@{storage_account}.dfs.core.windows.net/hospital_general_information"
+## 6) Cost control (do this)
+- Use a **single-node** jobs cluster
+- **Auto-terminate** at 10–15 minutes
+- Don’t leave clusters running
+- Run ADF trigger daily or manual
+
+---
+
+## 7) What this proves to employers
+- External ingestion with ADF (HTTP → lake)
+- Medallion layering (Bronze/Silver/Gold)
+- Real PySpark data cleaning + standardization
+- Delta Lake outputs
+- Managed Identity security patterns (no secrets)
+
+---
+
+## Notes
+- Dataset schema can evolve. This notebook is defensive (casts + “Not Available” handling).
+- If the CSV column names differ slightly, update the `expected_cols` mapping in the notebook.
