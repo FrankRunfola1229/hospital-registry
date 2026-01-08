@@ -52,7 +52,7 @@ def normalize_nulls(df):
 # ---- bronze read ----
 raw = (spark.read
        .option("header", True)
-       .option("inferSchema", False)   # portfolio: be explicit later
+       .option("inferSchema", False)
        .csv(bronze_path))
 
 # rename columns
@@ -62,7 +62,6 @@ for c in raw.columns:
 df = normalize_nulls(raw)
 
 # ---- standardize a few common columns (best-effort) ----
-# Provider ID is typically present; if not, the dataset changed—inspect columns and update logic.
 if "provider_id" not in df.columns:
     raise ValueError(f"Expected 'provider_id' column not found. Columns: {df.columns}")
 
@@ -73,7 +72,7 @@ if "zip_code" in df.columns:
     df = df.withColumn(
         "zip_code",
         F.when(F.col("zip_code").isNull(), None)
-         .otherwise(F.lpad(F.regexp_extract(F.col("zip_code").cast("string"), r"(\\d+)", 1), 5, "0"))
+         .otherwise(F.lpad(F.regexp_extract(F.col("zip_code").cast("string"), r"(\d+)", 1), 5, "0"))
     )
 
 # Phone digits only
@@ -145,10 +144,3 @@ if "hospital_type" in silver.columns:
     print("✅ Wrote Gold: hospitals_by_type")
 else:
     print("⚠️ 'hospital_type' column not found; skipping hospitals_by_type")
-
-# ---- quick validation (optional) ----
-print("\n--- Quick validation sample ---")
-try:
-    spark.read.format("delta").load(f"{gold_root}/hospitals_by_state").orderBy(F.desc("hospital_count")).show(10, False)
-except Exception as e:
-    print("Validation skipped:", e)
