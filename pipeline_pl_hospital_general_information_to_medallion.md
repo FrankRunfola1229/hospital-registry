@@ -1,92 +1,103 @@
 # ADF Pipeline: pl_hospital_general_information_to_medallion
 
-## Goal
-- Copy public CMS CSV (HTTP) into ADLS **Bronze**
-- Trigger Databricks notebook to produce **Silver** and **Gold** Delta outputs
+This doc tells you exactly what to build in **Azure Data Factory**.
 
-**Public CSV used**
-- https://data.cms.gov/provider-data/sites/default/files/resources/092256becd267d9eeccf73bf7d16c46b_1689206722/Hospital_General_Information.csv
+## Why your CSV links broke
+The CMS Provider Data Catalog frequently rotates the underlying download file URL. If you hard-code a CSV URL, it *will* eventually 404.
+
+This pipeline avoids that by having Databricks resolve the current download URL at runtime via the Provider Data Catalog **metastore** API.
+
+---
+
+## Goal
+- Orchestrate a Databricks notebook that:
+  1) resolves the current CMS CSV download URL (no keys)
+  2) downloads to ADLS **Bronze**
+  3) writes **Silver/Gold** Delta outputs
+
+You still get the real ADF skill employers care about: linked services, parameters, notebook orchestration, and MI-based security.
 
 ---
 
 ## 1) Linked Services
 
-### 1.1 HTTP
-- Type: HTTP
-- Auth: Anonymous (no auth)
-
-### 1.2 ADLS Gen2
+### 1.1 ADLS Gen2
 - Type: Azure Data Lake Storage Gen2
 - Authentication: **Managed Identity**
 - Storage account: your ADLS account
 
 **RBAC required**
 - Storage account IAM:
-  - Role: Storage Blob Data Contributor
-  - Principal: ADF **system-assigned managed identity**
+  - Role: **Storage Blob Data Contributor**
+  - Assign to: ADF **system-assigned managed identity**
 
-### 1.3 Azure Databricks
+### 1.2 Azure Databricks
 - Type: Azure Databricks
 - Authentication: **Managed service identity (MSI)** (no PAT token)
 - Workspace: select your Databricks workspace
 
 ---
 
-## 2) Datasets
-
-### 2.1 HTTP dataset (DelimitedText)
-- URL:
-  - `https://data.cms.gov/provider-data/sites/default/files/resources/092256becd267d9eeccf73bf7d16c46b_1689206722/Hospital_General_Information.csv`
-- First row as header: True
-- Column delimiter: comma
-- Encoding: UTF-8
-
-### 2.2 ADLS Bronze dataset (DelimitedText)
-- Linked service: ADLS Gen2 (MI)
-- Container: `bronze`
-- Directory:
-  - `hospital_general_information/run_date=@{pipeline().parameters.run_date}`
-- File name:
-  - `hospital_general_information.csv`
-
----
-
-## 3) Pipeline
+## 2) Pipeline
 
 Pipeline name:
 - `pl_hospital_general_information_to_medallion`
 
-### 3.1 Parameters
+### 2.1 Parameters
 - `run_date` (String)
   - Default: `@formatDateTime(utcNow(),'yyyy-MM-dd')`
-- `source_url` (String)
-  - Default: `https://data.cms.gov/provider-data/sites/default/files/resources/092256becd267d9eeccf73bf7d16c46b_1689206722/Hospital_General_Information.csv`
 - `storage_account` (String)
   - Default: your storage account name (e.g., `sthcmedallion01`)
+- `dataset_id` (String)
+  - Default: `xubh-q36u` (Hospital General Information)
 
-### 3.2 Activities
+### 2.2 Activities
 
-#### Activity 1 — Copy data (HTTP → ADLS Bronze)
-- Source: HTTP dataset (or parameterize URL from `source_url`)
-- Sink: ADLS Bronze dataset (uses `run_date` in output path)
-
-#### Activity 2 — Databricks Notebook
+#### Activity 1 — Databricks Notebook
 - Linked service: Databricks (MSI)
 - Notebook path:
-  - `/Workspace/Repos/<your_repo>/notebooks/01_hospital_general_information_medallion`
-  - or upload notebook directly under Workspace
+  - `/Workspace/.../notebooks/01_hospital_general_information_medallion`
 - Base parameters:
   - `storage_account`: `@{pipeline().parameters.storage_account}`
   - `run_date`: `@{pipeline().parameters.run_date}`
+  - `dataset_id`: `@{pipeline().parameters.dataset_id}`
+
+---
+
+## 3) Trigger
+Start manual first. After it works, add a daily trigger.
 
 ---
 
 ## 4) Verification checklist
-- ADLS Bronze has:
+- ADLS Bronze has a new file at:
   - `bronze/hospital_general_information/run_date=YYYY-MM-DD/hospital_general_information.csv`
-- ADLS Silver has:
+- ADLS Silver has Delta output at:
   - `silver/hospital_general_information/`
-- ADLS Gold has:
+- ADLS Gold has Delta outputs at:
   - `gold/hospital_general_information/hospitals_by_state/`
   - `gold/hospital_general_information/rating_distribution/`
   - `gold/hospital_general_information/hospitals_by_type/`
+
+---
+
+## Optional: if you want ADF to do the HTTP→Bronze copy anyway
+If you want to show off a more “classic” ingestion pattern in ADF:
+
+1) Add a **Web** activity `GetDatasetMetadata`
+- URL:
+  - `https://data.cms.gov/provider-data/api/1/metastore/schemas/dataset/items/@{pipeline().parameters.dataset_id}?show-reference-ids=false`
+
+2) Add a **Set variable** activity `SetDownloadUrl`
+- Variable: `download_url`
+- Value (adjust if the JSON shape differs):
+  - `@activity('GetDatasetMetadata').output.distribution[0].data.downloadURL`
+
+3) Add a **Copy Data** activity
+- Source: HTTP (Anonymous)
+- URL: `@variables('download_url')`
+- Sink: ADLS Bronze (same folder layout)
+
+Then keep the Databricks notebook activity (but pass `download_url_override` so the notebook skips resolving again).
+
+Reason I made this optional: the metastore response shape can vary, and I don’t want your first run blocked on ADF JSON-path quirks.

@@ -3,7 +3,7 @@
 A small, job-relevant Azure data engineering project using **public healthcare CSV data**, **ADLS Gen2**, **Azure Data Factory**, and **Azure Databricks**.
 
 ✅ **No secret keys / no PATs / no connection strings** — use **Managed Identity** end-to-end:
-- **ADF** uses its **system-assigned managed identity** to write to ADLS (RBAC).
+- **ADF** uses its **system-assigned managed identity** to orchestrate and (optionally) write to ADLS (RBAC).
 - **ADF → Databricks** uses **MSI authentication** for the Databricks linked service (no PAT token).
 - **Databricks → ADLS** uses a **managed identity** via an **Access Connector for Azure Databricks** + **Unity Catalog external location** (recommended approach for “no secrets”).
 
@@ -13,43 +13,52 @@ A small, job-relevant Azure data engineering project using **public healthcare C
 
 **“Public healthcare provider registry ingestion + quality-ready curated layer.”**
 
-We ingest a public CMS/Medicare hospital registry CSV, land it in a lake (Bronze), clean and standardize it (Silver), and publish analyst-ready aggregates (Gold) like:
+We ingest a public CMS hospital registry dataset, land it in a lake (Bronze), clean and standardize it (Silver), and publish analyst-ready aggregates (Gold) like:
 - hospitals by state (counts, % with emergency services)
 - rating distribution
 - hospitals by type
-
-**Data source (public CSV):**
-- Hospital General Information (CMS Provider Data Catalog)
-  - https://data.cms.gov/provider-data/sites/default/files/resources/092256becd267d9eeccf73bf7d16c46b_1689206722/Hospital_General_Information.csv
 
 No PHI. This is safe portfolio data.
 
 ---
 
-## 2) Architecture
+## 2) Why your CSV link broke (and how this project avoids it)
+
+The CMS Provider Data Catalog often rotates the underlying **download file URL** behind a dataset. That’s why links like “`.../Hospital_General_Information.csv`” or older Data.Medicare.gov export links can start failing.
+
+**Fix:** don’t hard-code the CSV file URL. Resolve the **current** download URL at runtime using the Provider Data Catalog **metastore API** and the dataset’s stable id:
+- Dataset page (stable id): `xubh-q36u` (Hospital General Information)
+- Metastore API pattern:
+  - `https://data.cms.gov/provider-data/api/1/metastore/schemas/dataset/items/<DATASET_ID>?show-reference-ids=false`
+
+This is the approach used in the included Databricks notebook.
+
+---
+
+## 3) Architecture
 
 **Services**
 - **ADLS Gen2**: `bronze/`, `silver/`, `gold/`
-- **Azure Data Factory**: copy (HTTP→ADLS) + orchestration + run notebook
-- **Azure Databricks**: PySpark transform + Delta outputs
+- **Azure Data Factory**: orchestration + run notebook (optionally: Web+Copy)
+- **Azure Databricks**: download + PySpark transforms + Delta outputs
 
-**Flow**
-1. ADF copies public CSV → ADLS **Bronze** (partitioned by run date)
-2. ADF triggers Databricks notebook
-3. Databricks reads Bronze CSV → writes **Silver** Delta
-4. Databricks creates **Gold** Delta aggregates
+**Flow (default, most reliable)**
+1. ADF triggers Databricks notebook
+2. Notebook resolves the current CMS download URL (metastore API)
+3. Notebook downloads CSV → ADLS **Bronze** (partitioned by run date)
+4. Notebook writes **Silver** Delta + **Gold** aggregates
 
 ```
-[Public CMS CSV] --(ADF Copy Activity)--> [ADLS Bronze]
-                                   |
-                                   +--(ADF Databricks Activity)--> [Databricks Notebook]
-                                                                  |-> [ADLS Silver (Delta)]
-                                                                  |-> [ADLS Gold (Delta)]
+[CMS Provider Data Catalog] --(metastore API)-> [Databricks]
+                                       |-> download CSV -> [ADLS Bronze]
+                                       |-> transform     -> [ADLS Silver (Delta)]
+                                       |-> aggregate     -> [ADLS Gold (Delta)]
+            ADF (MSI)  -----------------+-> orchestrate notebook run
 ```
 
 ---
 
-## 3) Repo structure
+## 4) Repo structure
 
 ```
 healthcare-hospitals-medallion01/
@@ -65,7 +74,7 @@ healthcare-hospitals-medallion01/
 
 ---
 
-## 4) Step-by-step (Azure Portal friendly)
+## 5) Step-by-step (Azure Portal friendly)
 
 ### Step 0 — Naming (keep it simple)
 - Resource group: `rg-healthcare-hospitals-medallion01`
@@ -102,39 +111,31 @@ To do “no secrets” correctly for Databricks reading/writing ADLS:
    - Role: **Storage Blob Data Contributor**
 3. In Databricks **Unity Catalog**:
    - Create a **Storage Credential** backed by the Access Connector
-   - Create **External Locations** for your `silver` and `gold` paths
-   - (Optional) Create **Volumes** for simpler paths
+   - Create **External Locations** for your `bronze/`, `silver/`, and `gold/` paths
 
 See `docs/managed-identity-notes.md` for a practical checklist.
 
-### Step 4 — ADF pipeline (HTTP → Bronze → Notebook)
-Build pipeline: `pl_hospital_general_information_to_medallion`
+### Step 4 — Import the notebook
+Upload `notebooks/01_hospital_general_information_medallion.py` to your Databricks workspace.
 
-- Pipeline parameters:
-  - `run_date` default: `@formatDateTime(utcNow(),'yyyy-MM-dd')`
-  - `source_url` default: `https://data.cms.gov/provider-data/sites/default/files/resources/092256becd267d9eeccf73bf7d16c46b_1689206722/Hospital_General_Information.csv`
+### Step 5 — Build the ADF pipeline (orchestrate notebook)
+Follow `adf/pipeline_pl_hospital_general_information_to_medallion.md`.
 
-Activities:
-1. **Copy Data** (Source = HTTP dataset, Sink = ADLS Bronze dataset)
-2. **Databricks Notebook** activity
-   - Notebook: `01_hospital_general_information_medallion`
-   - Parameters:
-     - `storage_account`
-     - `run_date`
-
-The exact build steps are in `adf/pipeline_pl_hospital_general_information_to_medallion.md`.
+Default parameters:
+- `dataset_id = xubh-q36u`
+- `run_date = today`
 
 ---
 
-## 5) Run it
-1. Trigger the pipeline manually in ADF (or add a daily trigger)
+## 6) Run it
+1. Trigger the pipeline manually in ADF
 2. Verify Bronze file exists in ADLS
 3. Verify Silver/Gold Delta folders are created
-4. In Databricks, run the validation cells at the bottom of the notebook
+4. In Databricks, check the printed “Quick validation sample” output
 
 ---
 
-## 6) Cost control (do this)
+## 7) Cost control (do this)
 - Use a **single-node** jobs cluster
 - **Auto-terminate** at 10–15 minutes
 - Don’t leave clusters running
@@ -142,9 +143,15 @@ The exact build steps are in `adf/pipeline_pl_hospital_general_information_to_me
 
 ---
 
-## 7) What this proves to employers
-- External ingestion with ADF (HTTP → lake)
+## 8) What this proves to employers
+- Orchestration with ADF + parameters
 - Medallion layering (Bronze/Silver/Gold)
-- Real PySpark data cleaning + standardization
+- Real PySpark cleaning + standardization + aggregation
 - Delta Lake outputs
 - Managed Identity security patterns (no secrets)
+
+---
+
+## Notes
+- CMS dataset schema can evolve. This notebook is defensive (casts + “Not Available” handling).
+- If the provider id column name changes, inspect columns and update the mapping section.
