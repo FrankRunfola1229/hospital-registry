@@ -81,9 +81,9 @@ hospital-registry/
 
 ### Step 0 — Naming (keep it simple)
 - Resource group: `rg-hospital-registry`
-- Storage account: `sthospitalregistry` (must be globally unique)
-- ADF: `adf-healthcare-hospitals01`
-- Databricks: `adb-healthcare-hospitals01`
+- Storage account: `storehospitalregistry` (must be globally unique)
+- ADF: `adf-hospital-registry`
+- Databricks: `adb-hospital-registry`
 
 ### Step 1 — Create ADLS Gen2 (HNS ON)
 1. Create Storage account
