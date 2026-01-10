@@ -80,7 +80,7 @@ hospital-registry/
 ## 5) Step-by-step (Azure Portal friendly)
 
 ### Step 0 — Naming (keep it simple)
-- Resource group: `rg-healthcare-hospitals-medallion01`
+- Resource group: `rg-hospital-registry`
 - Storage account: `sthcmedallion01` (must be globally unique)
 - ADF: `adf-healthcare-hospitals01`
 - Databricks: `adb-healthcare-hospitals01`
